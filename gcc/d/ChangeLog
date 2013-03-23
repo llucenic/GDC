@@ -1,3 +1,7 @@
+2013-03-24  Iain Buclaw  <ibuclaw@gdcproject.org>
+
+	* GDC 4.8 branch created.
+
 2013-03-23  Iain Buclaw  <ibuclaw@gdcproject.org>
 
 	* d-lang.h(D_TYPE_HIDDEN_THIS): New macro to mark converted nested
