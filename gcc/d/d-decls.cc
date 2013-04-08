@@ -16,7 +16,7 @@
 // <http://www.gnu.org/licenses/>.
 
 
-#include "d-gcc-includes.h"
+#include "d-system.h"
 
 #include "mars.h"
 #include "statement.h"
@@ -348,35 +348,22 @@ FuncDeclaration::toSymbol (void)
 	  if (gen.functionNeedsChain (this))
 	    {
 	      D_DECL_STATIC_CHAIN (fndecl) = 1;
-
-	      /* If a template instance has a nested function (because a template
-		 argument is a local variable), the nested function may not have
-		 its toObjFile called before the outer function is finished.
-		 GCC requires that nested functions be finished first so we need
-		 to arrange for toObjFile to be called earlier.  */
-	      FuncDeclaration *outer_func = NULL;
-	      bool is_template_member = false;
-	      for (Dsymbol *p = parent; p; p = p->parent)
-		{
-		  if (p->isTemplateInstance() && !p->isTemplateMixin())
-		    is_template_member = true;
-		  else if (p->isFuncDeclaration())
-		    {
-		      outer_func = (FuncDeclaration *) p;
-		      break;
-		    }
-		}
-	      if (is_template_member && outer_func)
-		{
-		  Symbol *outer_sym = outer_func->toSymbol();
-
-		  if (outer_sym->outputStage != Finished)
-		    outer_sym->deferredNestedFuncs.push (this);
-		}
-
 	      // Save context and set decl_function_context for cgraph.
 	      csym->ScontextDecl = DECL_CONTEXT (fndecl);
 	      DECL_CONTEXT (fndecl) = decl_function_context (fndecl);
+	    }
+
+
+	  /* Nested functions may not have its toObjFile called before the outer
+	     function is finished.  GCC requires that nested functions be finished
+	     first so we need to arrange for toObjFile to be called earlier.  */
+	  Dsymbol *outer = toParent2();
+	  if (outer && outer->isFuncDeclaration())
+	    {
+	      Symbol *osym = outer->toSymbol();
+
+	      if (osym->outputStage != Finished)
+		((FuncDeclaration *) outer)->deferred.push (this);
 	    }
 
 	  TREE_TYPE (fndecl) = ftype->toCtype();
@@ -493,8 +480,7 @@ FuncDeclaration::toSymbol (void)
 
 	  TREE_USED (fndecl) = 1; // %% Probably should be a little more intelligent about this
 
-	  gen.maybeSetLibCallDecl (this);
-	  gen.maybeSetUpBuiltin (this);
+	  maybe_set_builtin_frontend (this);
 	}
       else
 	{

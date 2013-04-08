@@ -15,7 +15,7 @@
 // along with GCC; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
-#include "d-gcc-includes.h"
+#include "d-system.h"
 #include "d-lang.h"
 #include "d-codegen.h"
 
@@ -35,13 +35,13 @@ FuncDeclaration::toObjFile (int)
   if (!object_file->shouldEmit (this))
     return;
 
-  Symbol *this_sym = toSymbol();
-  if (this_sym->outputStage)
+  Symbol *sym = toSymbol();
+  if (sym->outputStage)
     return;
 
-  this_sym->outputStage = InProgress;
+  sym->outputStage = InProgress;
 
-  tree fndecl = this_sym->Stree;
+  tree fndecl = sym->Stree;
 
   if (!fbody)
     {
@@ -180,10 +180,6 @@ FuncDeclaration::toObjFile (int)
 
   fbody->toIR (irs);
 
-  // Process all deferred nested functions.
-  for (size_t i = 0; i < this_sym->deferredNestedFuncs.dim; ++i)
-    (this_sym->deferredNestedFuncs[i])->toObjFile (false);
-
   if (v_argptr)
     {
       tree body = irs->popStatementList();
@@ -273,10 +269,17 @@ FuncDeclaration::toObjFile (int)
 	}
     }
 
-  this_sym->outputStage = Finished;
+  sym->outputStage = Finished;
 
   if (!errorcount && !global.errors)
     object_file->outputFunction (this);
+
+  // Process all deferred nested functions.
+  for (size_t i = 0; i < this->deferred.dim; ++i)
+    {
+      FuncDeclaration *fd = this->deferred[i];
+      fd->toObjFile (0);
+    }
 
   current_function_decl = old_current_function_decl;
   set_cfun (old_cfun);
@@ -312,7 +315,7 @@ FuncDeclaration::buildClosure (IRState *irs)
 
   DECL_INITIAL (closure_ptr) =
     build_nop (TREE_TYPE (closure_ptr),
-	       irs->libCall (LIBCALL_ALLOCMEMORY, 1, &arg));
+	       build_libcall (LIBCALL_ALLOCMEMORY, 1, &arg));
   irs->expandDecl (closure_ptr);
 
   // set the first entry to the parent closure, if any
@@ -341,7 +344,7 @@ FuncDeclaration::buildClosure (IRState *irs)
 }
 
 void
-Module::genobjfile (int multiobj)
+Module::genobjfile (int)
 {
   /* Normally would create an ObjFile here, but gcc is limited to one obj file
      per pass and there may be more than one module per obj file. */
@@ -355,12 +358,13 @@ Module::genobjfile (int multiobj)
       for (size_t i = 0; i < members->dim; i++)
 	{
 	  Dsymbol *dsym = (*members)[i];
-	  dsym->toObjFile (multiobj);
+	  dsym->toObjFile (0);
 	}
     }
 
-  // Always generate module info.
-  if (1 || needModuleInfo())
+  // Default behaviour is to always generate module info because of templates.
+  // Can be switched off for not compiling against runtime library.
+  if (!global.params.betterC)
     {
       ModuleInfo& mi = *object_file->moduleInfo;
       if (mi.ctors.dim || mi.ctorgates.dim)
@@ -369,7 +373,7 @@ Module::genobjfile (int multiobj)
 	sdtor = object_file->doDtorFunction ("*__moddtor", &mi.dtors)->toSymbol();
       if (mi.sharedctors.dim || mi.sharedctorgates.dim)
 	ssharedctor = object_file->doCtorFunction ("*__modsharedctor",
-					       &mi.sharedctors, &mi.sharedctorgates)->toSymbol();
+						   &mi.sharedctors, &mi.sharedctorgates)->toSymbol();
       if (mi.shareddtors.dim)
 	sshareddtor = object_file->doDtorFunction ("*__modshareddtor", &mi.shareddtors)->toSymbol();
       if (mi.unitTests.dim)
@@ -788,13 +792,17 @@ ObjectFile::shouldEmit (Declaration *d_sym)
 	  gcc_assert (global.errors);
 	  return false;
 	}
+    }
 
-      // Defer emitting nested functions whose parent isn't started yet.
-      // If the parent never gets emitted, then neither will fd.
-      FuncDeclaration *outerfd = fd->toParent2()->isFuncDeclaration();
-      if (outerfd && outerfd->toSymbol()->outputStage == NotStarted)
+  // Defer emitting nested functions whose parent isn't started yet.
+  // If the parent never gets emitted, then neither will fd.
+  Dsymbol *outer = fd->toParent2();
+  if (outer && outer->isFuncDeclaration())
+    {
+      Symbol *osym = outer->toSymbol();
+      if (osym->outputStage != Finished)
 	{
-	  outerfd->toSymbol()->deferredNestedFuncs.push (fd);
+	  ((FuncDeclaration *) outer)->deferred.push (fd);
 	  return false;
 	}
     }
@@ -1120,7 +1128,7 @@ ObjectFile::doSimpleFunction (const char *name, tree expr, bool static_ctor, boo
   // %% maybe remove the identifier
   WrappedExp *body = new WrappedExp (current_module->loc, TOKcomma, expr, Type::tvoid);
   func->fbody = new ExpStatement (current_module->loc, body);
-  func->toObjFile (false);
+  func->toObjFile (0);
 
   return func;
 }
@@ -1442,7 +1450,7 @@ void
 obj_append (Dsymbol *s)
 {
   // GDC does not do multi-obj, so just write it out now.
-  s->toObjFile (false);
+  s->toObjFile (0);
 }
 
 // Put out symbols that define the beginning and end

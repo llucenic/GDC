@@ -15,7 +15,7 @@
 // along with GCC; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
-#include "d-gcc-includes.h"
+#include "d-system.h"
 #include "d-lang.h"
 #include "d-codegen.h"
 
@@ -315,14 +315,14 @@ IRState::convertTo (tree exp, Type *exp_type, Type *target_type)
       if (tbtype->ty == Tdelegate)
 	{
 	  exp = maybe_make_temp (exp);
-	  return delegateVal (delegateMethodRef (exp), delegateObjectRef (exp),
-			      target_type);
+	  return build_delegate_cst (delegate_method (exp), delegate_object (exp),
+				     target_type);
 	}
       else if (tbtype->ty == Tpointer)
 	{
 	  // The front-end converts <delegate>.ptr to cast (void *)<delegate>.
 	  // Maybe should only allow void* ?
-	  exp = delegateObjectRef (exp);
+	  exp = delegate_object (exp);
 	}
       else
 	{
@@ -396,8 +396,8 @@ IRState::convertTo (tree exp, Type *exp_type, Type *target_type)
 	    tree args[2];
 	    args[0] = exp;
 	    args[1] = build_address (target_class_decl->toSymbol()->Stree);
-	    return libCall (obj_class_decl->isInterfaceDeclaration()
-			    ? LIBCALL_INTERFACE_CAST : LIBCALL_DYNAMIC_CAST, 2, args);
+	    return build_libcall (obj_class_decl->isInterfaceDeclaration()
+				  ? LIBCALL_INTERFACE_CAST : LIBCALL_DYNAMIC_CAST, 2, args);
 	  }
 	else
 	  {
@@ -421,23 +421,23 @@ IRState::convertTo (tree exp, Type *exp_type, Type *target_type)
 	}
       else if (tbtype->ty == Tarray)
 	{
-	  TypeSArray *a_type = (TypeSArray *) ebtype;
+	  dinteger_t dim = ((TypeSArray *) ebtype)->dim->toInteger();
+	  dinteger_t esize = ebtype->nextOf()->size();
+	  dinteger_t tsize = tbtype->nextOf()->size();
 
-	  uinteger_t array_len = a_type->dim->toUInteger();
-	  d_uns64 sz_a = a_type->next->size();
-	  d_uns64 sz_b = tbtype->nextOf()->size();
+	  tree ptrtype = tbtype->nextOf()->pointerTo()->toCtype();
 
-	  // conversions to different sizes
-	  // Assumes tvoid->size() == 1
-	  // %% TODO: handle misalign like _d_arraycast_xxx ?
-	  if (sz_a != sz_b)
-	    array_len = array_len * sz_a / sz_b;
-
-	  tree pointer_value = build_nop (tbtype->nextOf()->pointerTo()->toCtype(),
-					  build_address (exp));
+	  if ((dim * esize) % tsize != 0)
+	    {
+	      ::error ("cannot cast %s to %s since sizes don't line up",
+		       exp_type->toChars(), target_type->toChars());
+	      return error_mark_node;
+	    }
+	  dim = (dim * esize) / tsize;
 
 	  // Assumes casting to dynamic array of same type or void
-	  return darrayVal (target_type, array_len, pointer_value);
+	  return d_array_value (target_type->toCtype(),
+				size_int (dim), build_nop (ptrtype, build_address (exp)));
 	}
       else if (tbtype->ty == Tsarray)
 	{
@@ -462,7 +462,7 @@ IRState::convertTo (tree exp, Type *exp_type, Type *target_type)
     case Tarray:
       if (tbtype->ty == Tpointer)
 	{
-	  return convertTo (target_type->toCtype(), darrayPtrRef (exp));
+	  return convertTo (target_type->toCtype(), d_array_ptr (exp));
 	}
       else if (tbtype->ty == Tarray)
 	{
@@ -484,14 +484,14 @@ IRState::convertTo (tree exp, Type *exp_type, Type *target_type)
 	      args[0] = build_integer_cst (sz_dst, Type::tsize_t->toCtype());
 	      args[1] = build_integer_cst (sz_src * mult, Type::tsize_t->toCtype());
 	      args[2] = exp;
-	      return libCall (LIBCALL_ARRAYCAST, 3, args, target_type->toCtype());
+	      return build_libcall (LIBCALL_ARRAYCAST, 3, args, target_type->toCtype());
 	    }
 	}
       else if (tbtype->ty == Tsarray)
 	{
 	  // %% Strings are treated as dynamic arrays D2.
 	  if (ebtype->isString() && tbtype->isString())
-	    return indirect_ref (target_type->toCtype(), darrayPtrRef (exp));
+	    return indirect_ref (target_type->toCtype(), d_array_ptr (exp));
 	}
       else
 	{
@@ -524,8 +524,9 @@ IRState::convertTo (tree exp, Type *exp_type, Type *target_type)
     case Tnull:
       if (tbtype->ty == Tarray)
 	{
-	  Type *pointer_type = tbtype->nextOf()->pointerTo();
-	  return darrayVal (target_type, 0, build_nop (pointer_type->toCtype(), exp));
+	  tree ptrtype = tbtype->nextOf()->pointerTo()->toCtype();
+	  return d_array_value (target_type->toCtype(),
+				size_int (0), build_nop (ptrtype, exp));
 	}
       break;
 
@@ -667,15 +668,15 @@ IRState::convertForCondition (tree exp_tree, Type *exp_type)
     {
     case Taarray:
       // Shouldn't this be...
-      //  result = libCall (LIBCALL_AALEN, 1, &exp_tree);
+      //  result = build_libcall (LIBCALL_AALEN, 1, &exp_tree);
       result = component_ref (exp_tree, TYPE_FIELDS (TREE_TYPE (exp_tree)));
       break;
 
     case Tarray:
       // Checks (length || ptr) (i.e ary !is null)
       tmp = maybe_make_temp (exp_tree);
-      obj = delegateObjectRef (tmp);
-      func = delegateMethodRef (tmp);
+      obj = delegate_object (tmp);
+      func = delegate_method (tmp);
       if (TYPE_MODE (TREE_TYPE (obj)) == TYPE_MODE (TREE_TYPE (func)))
 	{
 	  result = build2 (BIT_IOR_EXPR, TREE_TYPE (obj), obj,
@@ -694,12 +695,12 @@ IRState::convertForCondition (tree exp_tree, Type *exp_type)
       // Checks (function || object), but what good is it
       // if there is a null function pointer?
       if (D_METHOD_CALL_EXPR (exp_tree))
-	extractMethodCallExpr (exp_tree, obj, func);
+	extract_from_method_call (exp_tree, obj, func);
       else
 	{
 	  tmp = maybe_make_temp (exp_tree);
-	  obj = delegateObjectRef (tmp);
-	  func = delegateMethodRef (tmp);
+	  obj = delegate_object (tmp);
+	  func = delegate_method (tmp);
 	}
       obj = d_truthvalue_conversion (obj);
       func = d_truthvalue_conversion (func);
@@ -1061,7 +1062,7 @@ tree_to_hwi (tree t)
 // Returns the .length component from the D dynamic array EXP.
 
 tree
-IRState::darrayLenRef (tree exp)
+d_array_length (tree exp)
 {
   // backend will ICE otherwise
   if (error_mark_p (exp))
@@ -1076,7 +1077,7 @@ IRState::darrayLenRef (tree exp)
 // Returns the .ptr component from the D dynamic array EXP.
 
 tree
-IRState::darrayPtrRef (tree exp)
+d_array_ptr (tree exp)
 {
   // backend will ICE otherwise
   if (error_mark_p (exp))
@@ -1088,19 +1089,11 @@ IRState::darrayPtrRef (tree exp)
   return component_ref (exp, ptr_field);
 }
 
-// Builds D dynamic array expression E and returns the .ptr component.
-
-tree
-IRState::darrayPtrRef (Expression *e)
-{
-  return darrayPtrRef (e->toElem (this));
-}
-
 // Returns a constructor for D dynamic array type TYPE of .length LEN
 // and .ptr pointing to DATA.
 
 tree
-IRState::darrayVal (tree type, tree len, tree data)
+d_array_value (tree type, tree len, tree data)
 {
   // %% assert type is a darray
   tree len_field, ptr_field;
@@ -1109,45 +1102,11 @@ IRState::darrayVal (tree type, tree len, tree data)
   len_field = TYPE_FIELDS (type);
   ptr_field = TREE_CHAIN (len_field);
 
+  len = convert (TREE_TYPE (len_field), len);
+  data = convert (TREE_TYPE (ptr_field), data);
+
   ce.cons (len_field, len);
-  ce.cons (ptr_field, data); // shouldn't need to convert the pointer...
-
-  tree ctor = build_constructor (type, ce.head);
-  TREE_STATIC (ctor) = 0;   // can be set by caller if needed
-  TREE_CONSTANT (ctor) = 0; // "
-
-  return ctor;
-}
-
-tree
-IRState::darrayVal (Type *type, uinteger_t len, tree data)
-{
-  return darrayVal (type->toCtype(), len, data);
-}
-
-tree
-IRState::darrayVal (tree type, uinteger_t len, tree data)
-{
-  // %% assert type is a darray
-  tree len_value, ptr_value, len_field, ptr_field;
-  CtorEltMaker ce;
-
-  len_field = TYPE_FIELDS (type);
-  ptr_field = TREE_CHAIN (len_field);
-
-  if (data)
-    {
-      gcc_assert (POINTER_TYPE_P (TREE_TYPE (data)));
-      ptr_value = data;
-    }
-  else
-    {
-      ptr_value = convertTo (TREE_TYPE (ptr_field), d_null_pointer);
-    }
-
-  len_value = build_integer_cst (len, TREE_TYPE (len_field));
-  ce.cons (len_field, len_value);
-  ce.cons (ptr_field, ptr_value); // shouldn't need to convert the pointer...
+  ce.cons (ptr_field, data);
 
   tree ctor = build_constructor (type, ce.head);
   // TREE_STATIC and TREE_CONSTANT can be set by caller if needed
@@ -1160,47 +1119,45 @@ IRState::darrayVal (tree type, uinteger_t len, tree data)
 // Builds a D string value from the C string STR.
 
 tree
-IRState::darrayString (const char *str)
+d_array_string (const char *str)
 {
   unsigned len = strlen (str);
-  // %% assumes str is null-terminated
+  // Assumes str is null-terminated.
   tree str_tree = build_string (len + 1, str);
 
   TREE_TYPE (str_tree) = d_array_type (Type::tchar, len);
 
-  return darrayVal (Type::tchar->arrayOf()->toCtype(),
-		    len, build_address (str_tree));
-}
-
-// Returns array length of expression EXP.
-
-tree
-IRState::arrayLength (Expression *exp)
-{
-  return arrayLength (exp->toElem (this), exp->type);
+  return d_array_value (Type::tchar->arrayOf()->toCtype(),
+			size_int (len), build_address (str_tree));
 }
 
 // Returns value representing the array length of expression EXP.
-// EXP_TYPE could be a dynamic or static array.
+// TYPE could be a dynamic or static array.
 
 tree
-IRState::arrayLength (tree exp, Type *exp_type)
+get_array_length (tree exp, Type *type)
 {
-  Type *base_type = exp_type->toBasetype();
-  switch (base_type->ty)
+  Type *tb = type->toBasetype();
+
+  switch (tb->ty)
     {
     case Tsarray:
-      return size_int (((TypeSArray *) base_type)->dim->toUInteger());
+      return size_int (((TypeSArray *) tb)->dim->toUInteger());
+
     case Tarray:
-      return darrayLenRef (exp);
+      return d_array_length (exp);
+
     default:
-      ::error ("can't determine the length of a %s", exp_type->toChars());
+      ::error ("can't determine the length of a %s", type->toChars());
       return error_mark_node;
     }
 }
 
+// Return TRUE if binary expression EXP is an unhandled array operation,
+// in which case we error that it is not implemented.
+
 bool
-IRState::arrayOpNotImplemented (BinExp *exp)
+unhandled_arrayop_p (BinExp *exp)
 {
   TY ty1 = exp->e1->type->toBasetype()->ty;
   TY ty2 = exp->e2->type->toBasetype()->ty;
@@ -1217,7 +1174,7 @@ IRState::arrayOpNotImplemented (BinExp *exp)
 // Returns the .funcptr component from the D delegate EXP.
 
 tree
-IRState::delegateMethodRef (tree exp)
+delegate_method (tree exp)
 {
   // Get the backend type for the array and pick out the array length
   // field (assumed to be the second field.)
@@ -1225,10 +1182,10 @@ IRState::delegateMethodRef (tree exp)
   return component_ref (exp, method_field);
 }
 
-// Returns the .object component from the D delegate EXP.
+// Returns the .object component from the delegate EXP.
 
 tree
-IRState::delegateObjectRef (tree exp)
+delegate_object (tree exp)
 {
   // Get the backend type for the array and pick out the array data
   // pointer field (assumed to be the first field.)
@@ -1236,12 +1193,13 @@ IRState::delegateObjectRef (tree exp)
   return component_ref (exp, obj_field);
 }
 
-// Converts pointer types of METHOD_EXP and OBJECT_EXP to match D_TYPE.
+// Build a delegate literal of type TYPE whose pointer function is
+// METHOD, and hidden object is OBJECT.  
 
 tree
-IRState::delegateVal (tree method_exp, tree object_exp, Type *d_type)
+build_delegate_cst (tree method, tree object, Type *type)
 {
-  Type *base_type = d_type->toBasetype();
+  Type *base_type = type->toBasetype();
 
   // Called from DotVarExp.  These are just used to make function calls
   // and not to make Tdelegate variables.  Clearing the type makes sure of this.
@@ -1250,61 +1208,61 @@ IRState::delegateVal (tree method_exp, tree object_exp, Type *d_type)
   else
     gcc_assert (base_type->ty == Tdelegate);
 
-  tree type = base_type ? base_type->toCtype() : NULL_TREE;
+  tree ctype = base_type ? base_type->toCtype() : NULL_TREE;
   tree ctor = make_node (CONSTRUCTOR);
   tree obj_field = NULL_TREE;
   tree func_field = NULL_TREE;
   CtorEltMaker ce;
 
-  if (type)
+  if (ctype)
     {
-      TREE_TYPE (ctor) = type;
-      obj_field = TYPE_FIELDS (type);
+      TREE_TYPE (ctor) = ctype;
+      obj_field = TYPE_FIELDS (ctype);
       func_field = TREE_CHAIN (obj_field);
     }
-  ce.cons (obj_field, object_exp);
-  ce.cons (func_field, method_exp);
+  ce.cons (obj_field, object);
+  ce.cons (func_field, method);
 
   CONSTRUCTOR_ELTS (ctor) = ce.head;
   return ctor;
 }
 
 // Builds a temporary tree to store the CALLEE and OBJECT
-// of a method call expression of type D_TYPE.
+// of a method call expression of type TYPE.
 
 tree
-IRState::methodCallExpr (tree callee, tree object, Type *d_type)
+build_method_call (tree callee, tree object, Type *type)
 {
-  tree t = delegateVal (callee, object, d_type);
+  tree t = build_delegate_cst (callee, object, type);
   D_METHOD_CALL_EXPR (t) = 1;
   return t;
 }
 
-// Extract callee and object from MCR and return in to CALLEE_OUT and OBJECT_OUT.
+// Extract callee and object from T and return in to CALLEE and OBJECT.
 
 void
-IRState::extractMethodCallExpr (tree mcr, tree& callee_out, tree& object_out)
+extract_from_method_call (tree t, tree& callee, tree& object)
 {
-  gcc_assert (D_METHOD_CALL_EXPR (mcr));
-
-  vec<constructor_elt, va_gc>* elts = CONSTRUCTOR_ELTS (mcr);
-  object_out = (*elts)[0].value;
-  callee_out = (*elts)[1].value;
+  gcc_assert (D_METHOD_CALL_EXPR (t));
+  vec<constructor_elt, va_gc>* elts = CONSTRUCTOR_ELTS (t);
+  object = (*elts)[0].value;
+  callee = (*elts)[1].value;
 }
 
 // Return correct callee for method FUNC, which is dereferenced from
-// the 'this' pointer OBJ_EXP.  D_TYPE is the return type for the method.
+// the 'this' pointer OBJEXP.  TYPE is the return type for the method.
 
 tree
-IRState::objectInstanceMethod (Expression *obj_exp, FuncDeclaration *func, Type *d_type)
+get_object_method (Expression *objexp, FuncDeclaration *func, Type *type)
 {
-  Type *obj_type = obj_exp->type->toBasetype();
+  Type *objtype = objexp->type->toBasetype();
+
   if (func->isThis())
     {
       bool is_dottype = false;
       tree this_expr;
 
-      Expression *ex = obj_exp;
+      Expression *ex = objexp;
       while (1)
 	{
 	  switch (ex->op)
@@ -1323,22 +1281,22 @@ IRState::objectInstanceMethod (Expression *obj_exp, FuncDeclaration *func, Type 
 	    }
 	  break;
 	}
-      this_expr = obj_exp->toElem (this);
+      this_expr = objexp->toElem (current_irs);
 
       // Calls to super are static (func is the super's method)
       // Structs don't have vtables.
       // Final and non-virtual methods can be called directly.
       // DotTypeExp means non-virtual
 
-      if (obj_exp->op == TOKsuper
-	  || obj_type->ty == Tstruct || obj_type->ty == Tpointer
+      if (objexp->op == TOKsuper
+	  || objtype->ty == Tstruct || objtype->ty == Tpointer
 	  || func->isFinal() || !func->isVirtual() || is_dottype)
 	{
-	  if (obj_type->ty == Tstruct)
+	  if (objtype->ty == Tstruct)
 	    this_expr = build_address (this_expr);
 
-	  return methodCallExpr (build_address (func->toSymbol()->Stree),
-				 this_expr, d_type);
+	  return build_method_call (build_address (func->toSymbol()->Stree),
+				    this_expr, type);
 	}
       else
 	{
@@ -1354,7 +1312,7 @@ IRState::objectInstanceMethod (Expression *obj_exp, FuncDeclaration *func, Type 
 	  vtbl_ref = build_offset (vtbl_ref, size_int (PTRSIZE * func->vtblIndex));
 	  vtbl_ref = indirect_ref (build_pointer_type (fntype), vtbl_ref);
 
-	  return methodCallExpr (vtbl_ref, this_expr, d_type);
+	  return build_method_call (vtbl_ref, this_expr, type);
 	}
     }
   else
@@ -1365,9 +1323,8 @@ IRState::objectInstanceMethod (Expression *obj_exp, FuncDeclaration *func, Type 
 }
 
 
-// Builds a record type from field types T1 and T2.
-// TYPE is the D frontend type we are building.
-// N1 and N2 are the names of the two fields.
+// Builds a record type from field types T1 and T2.  TYPE is the D frontend
+// type we are building. N1 and N2 are the names of the two fields.
 
 tree
 build_two_field_type (tree t1, tree t2, Type *type, const char *n1, const char *n2)
@@ -1465,7 +1422,8 @@ IRState::toElemLvalue (Expression *e)
 	  args[2] = build_integer_cst (array_type->nextOf()->size(), Type::tsize_t->toCtype());
 	  args[3] = aoe.set (this, convertTo (e2, key_type));
 
-	  result = aoe.finish (this, libCall (LIBCALL_AAGETX, 4, args, type->pointerTo()->toCtype()));
+	  result = aoe.finish (build_libcall (LIBCALL_AAGETX, 4, args,
+					      type->pointerTo()->toCtype()));
 	  return build1 (INDIRECT_REF, type->toCtype(), result);
 	}
     }
@@ -1940,7 +1898,7 @@ IRState::arrayElemRef (IndexExp *ae, ArrayScope *asc)
     {
     case Tarray:
     case Tsarray:
-      array_expr = asc->setArrayExp (this, array_expr, e1->type);
+      array_expr = asc->setArrayExp (array_expr, e1->type);
 
       // If it's a static array and the index is constant,
       // the front end has already checked the bounds.
@@ -1957,7 +1915,7 @@ IRState::arrayElemRef (IndexExp *ae, ArrayScope *asc)
 	  if (base_type_ty == Tarray)
 	    {
 	      array_expr = maybe_make_temp (array_expr);
-	      array_len_expr = darrayLenRef (array_expr);
+	      array_len_expr = d_array_length (array_expr);
 	    }
 	  else
 	    array_len_expr = ((TypeSArray *) base_type)->dim->toElem (this);
@@ -1967,7 +1925,7 @@ IRState::arrayElemRef (IndexExp *ae, ArrayScope *asc)
 	}
 
       if (base_type_ty == Tarray)
-	ptr_exp = darrayPtrRef (array_expr);
+	ptr_exp = d_array_ptr (array_expr);
       else
 	ptr_exp = build_address (array_expr);
 
@@ -1986,7 +1944,7 @@ IRState::arrayElemRef (IndexExp *ae, ArrayScope *asc)
     }
 
   ptr_exp = void_okay_p (ptr_exp);
-  subscript_expr = asc->finish (this, subscript_expr);
+  subscript_expr = asc->finish (subscript_expr);
   elem_ref = indirect_ref (TREE_TYPE (TREE_TYPE (ptr_exp)),
 			   pointerIntSum (ptr_exp, subscript_expr));
 
@@ -2047,7 +2005,7 @@ IRState::arraySetExpr (tree ptr, tree value, tree count)
 // Builds a BIND_EXPR around BODY for the variables VAR_CHAIN.
 
 tree
-IRState::binding (tree var_chain, tree body)
+bind_expr (tree var_chain, tree body)
 {
   // TODO: only handles one var
   gcc_assert (TREE_CHAIN (var_chain) == NULL_TREE);
@@ -2175,14 +2133,14 @@ IRState::call (Expression *expr, Expressions *arguments)
       else
 	tf = get_function_type (t);
 
-      extractMethodCallExpr (callee, callee, object);
+      extract_from_method_call (callee, callee, object);
     }
   else if (t->ty == Tdelegate)
     {
       tf = (TypeFunction *) ((TypeDelegate *) t)->next;
       callee = maybe_make_temp (callee);
-      object = delegateObjectRef (callee);
-      callee = delegateMethodRef (callee);
+      object = delegate_object (callee);
+      callee = delegate_method (callee);
     }
   else if (expr->op == TOKvar)
     {
@@ -2314,8 +2272,8 @@ IRState::call (TypeFunction *func_type, tree callable, tree object, Expressions 
 	  if (flag_split_darrays && actual_arg_exp->type->toBasetype()->ty == Tarray)
 	    {
 	      tree da_exp = maybe_make_temp (actual_arg_exp->toElem (this));
-	      actual_arg_list.cons (darrayLenRef (da_exp));
-	      actual_arg_list.cons (darrayPtrRef (da_exp));
+	      actual_arg_list.cons (d_array_length (da_exp));
+	      actual_arg_list.cons (d_array_ptr (da_exp));
 	      continue;
 	    }
 	  else
@@ -2351,13 +2309,14 @@ tree
 IRState::assertCall (Loc loc, LibCall libcall)
 {
   tree args[2];
-  args[0] = darrayString (loc.filename ? loc.filename : "");
+
+  args[0] = d_array_string (loc.filename ? loc.filename : "");
   args[1] = build_integer_cst (loc.linnum, Type::tuns32->toCtype());
 
   if (libcall == LIBCALL_ASSERT && this->func->isUnitTestDeclaration())
     libcall = LIBCALL_UNITTEST;
 
-  return libCall (libcall, 2, args);
+  return build_libcall (libcall, 2, args);
 }
 
 // Builds a call to AssertErrorMsg.
@@ -2366,14 +2325,15 @@ tree
 IRState::assertCall (Loc loc, Expression *msg)
 {
   tree args[3];
+
   args[0] = msg->toElem (this);
-  args[1] = darrayString (loc.filename ? loc.filename : "");
+  args[1] = d_array_string (loc.filename ? loc.filename : "");
   args[2] = build_integer_cst (loc.linnum, Type::tuns32->toCtype());
 
   LibCall libcall = this->func->isUnitTestDeclaration() ?
     LIBCALL_UNITTEST_MSG : LIBCALL_ASSERT_MSG;
 
-  return libCall (libcall, 3, args);
+  return build_libcall (libcall, 3, args);
 }
 
 
@@ -2429,7 +2389,7 @@ static FuncDeclaration *libcall_decls[LIBCALL_count];
 // more like GCC builtin trees.
 
 FuncDeclaration *
-IRState::getLibCallDecl (LibCall libcall)
+get_libcall (LibCall libcall)
 {
   FuncDeclaration *decl = libcall_decls[libcall];
 
@@ -2864,41 +2824,14 @@ IRState::getLibCallDecl (LibCall libcall)
   return decl;
 }
 
-void
-IRState::maybeSetLibCallDecl (FuncDeclaration *decl)
-{
-  if (!decl->ident)
-    return;
-
-  LibCall libcall = (LibCall) binary (decl->ident->string, libcall_ids, LIBCALL_count);
-  if (libcall == LIBCALL_NONE)
-    return;
-
-  if (libcall_decls[libcall] == decl)
-    return;
-
-  TypeFunction *tf = (TypeFunction *) decl->type;
-  if (tf->parameters == NULL)
-    {
-      FuncDeclaration *new_decl = getLibCallDecl (libcall);
-      new_decl->toSymbol();
-
-      decl->type = new_decl->type;
-      decl->csym = new_decl->csym;
-    }
-
-  libcall_decls[libcall] = decl;
-}
-
-// Build call to LIBCALL. N_ARGS is the number of call arguments
-// which are specified in as a tree array ARGS.  The caller can
-// force the return type of the call to FORCE_RESULT_TYPE if the
-// library call returns a generic value.
+// Build call to LIBCALL. N_ARGS is the number of call arguments which are
+// specified in as a tree array ARGS.  The caller can force the return type
+// of the call to FORCE_TYPE if the library call returns a generic value.
 
 tree
-IRState::libCall (LibCall libcall, unsigned n_args, tree *args, tree force_result_type)
+build_libcall (LibCall libcall, unsigned n_args, tree *args, tree force_type)
 {
-  FuncDeclaration *lib_decl = getLibCallDecl (libcall);
+  FuncDeclaration *lib_decl = get_libcall (libcall);
   Type *type = lib_decl->type->nextOf();
   tree callee = build_address (lib_decl->toSymbol()->Stree);
   tree arg_list = NULL_TREE;
@@ -2908,9 +2841,9 @@ IRState::libCall (LibCall libcall, unsigned n_args, tree *args, tree force_resul
 
   tree result = d_build_call (type->toCtype(), callee, arg_list);
 
-  // for force_result_type, assumes caller knows what it is doing %%
-  if (force_result_type != NULL_TREE)
-    return convert (force_result_type, result);
+  // for TYPE, assumes caller knows what it is doing %%
+  if (force_type != NULL_TREE)
+    return convert (force_type, result);
 
   return result;
 }
@@ -3124,10 +3057,10 @@ IRState::maybeExpandSpecialCall (tree call_exp)
 
 	      tree e1 = vmodify_expr (lvar, build1 (VA_ARG_EXPR, ltype, op1));
 	      tree e2 = vmodify_expr (pvar, build1 (VA_ARG_EXPR, ptype, op1));
-	      tree val = darrayVal (type, lvar, pvar);
+	      tree val = d_array_value (type, lvar, pvar);
 
 	      exp = compound_expr (compound_expr (e1, e2), val);
-	      exp = binding (lvar, binding (pvar, exp));
+	      exp = bind_expr (lvar, bind_expr (pvar, exp));
 	    }
 	  else
 	    {
@@ -3143,7 +3076,7 @@ IRState::maybeExpandSpecialCall (tree call_exp)
 
 	  return exp;
 
-	case INTRINSIC_C_VA_START:
+	case INTRINSIC_VA_START:
 	  /* The va_list argument should already have its
 	     address taken.  The second argument, however, is
 	     inout and that needs to be fixed to prevent a warning.  */
@@ -3217,101 +3150,123 @@ IRState::typeinfoReference (Type *t)
   return ti_ref;
 }
 
-// Returns TRUE if DECL is an intrinsic function that requires
-// special processing.  Marks the generated trees for DECL
+// Checks if DECL is an intrinsic or runtime library function that
+// requires special processing.  Marks the generated trees for DECL
 // as BUILT_IN_FRONTEND so can be identified later.
 
-bool
-IRState::maybeSetUpBuiltin (Declaration *decl)
+void
+maybe_set_builtin_frontend (FuncDeclaration *decl)
 {
-  Dsymbol *dsym;
-  TemplateInstance *ti;
+  if (!decl->ident)
+    return;
 
-  // Don't use toParent2.  We are looking for a template below.
-  dsym = decl->toParent();
+  LibCall libcall = (LibCall) binary (decl->ident->string, libcall_ids, LIBCALL_count);
 
-  if (!dsym)
-    return false;
-
-  if ((gen.intrinsicModule && dsym->getModule() == gen.intrinsicModule))
+  if (libcall != LIBCALL_NONE)
     {
-      // Matches order of Intrinsic enum
-      static const char *intrinsic_names[] = {
-	  "bsf", "bsr", "bswap",
-	  "btc", "btr", "bts",
-      };
-      const size_t sz = sizeof (intrinsic_names) / sizeof (char *);
-      int i = binary (decl->ident->string, intrinsic_names, sz);
-      if (i == -1)
-	return false;
+      // It's a runtime library function, add to libcall_decls.
+      if (libcall_decls[libcall] == decl)
+	return;
 
-      // Make sure 'i' is within the range we require.
-      gcc_assert (i >= INTRINSIC_BSF && i <= INTRINSIC_BTS);
-      tree t = decl->toSymbol()->Stree;
-
-      DECL_BUILT_IN_CLASS (t) = BUILT_IN_FRONTEND;
-      DECL_FUNCTION_CODE (t) = (built_in_function) i;
-      return true;
-    }
-  else if ((gen.mathModule && dsym->getModule() == gen.mathModule)
-	   || (gen.mathCoreModule && dsym->getModule() == gen.mathCoreModule))
-    {
-      // Matches order of Intrinsic enum
-      static const char *math_names[] = {
-	  "cos", "fabs", "ldexp",
-	  "rint", "rndtol", "sin",
-	  "sqrt",
-      };
-      const size_t sz = sizeof (math_names) / sizeof (char *);
-      int i = binary (decl->ident->string, math_names, sz);
-      if (i == -1)
-	return false;
-
-      // Adjust 'i' for this range of enums
-      i += INTRINSIC_COS;
-      gcc_assert (i >= INTRINSIC_COS && i <= INTRINSIC_SQRT);
-      tree t = decl->toSymbol()->Stree;
-
-      // rndtol returns a long, sqrt any real value,
-      // every other math builtin returns an 80bit float.
-      Type *tf = decl->type->nextOf();
-      if ((i == INTRINSIC_RNDTOL && tf->ty == Tint64)
-	  || (i == INTRINSIC_SQRT && tf->isreal())
-	  || (i != INTRINSIC_RNDTOL && tf->ty == Tfloat80))
+      TypeFunction *tf = (TypeFunction *) decl->type;
+      if (tf->parameters == NULL)
 	{
-	  DECL_BUILT_IN_CLASS (t) = BUILT_IN_FRONTEND;
-	  DECL_FUNCTION_CODE (t) = (built_in_function) i;
-	  return true;
+	  FuncDeclaration *new_decl = get_libcall (libcall);
+	  new_decl->toSymbol();
+
+	  decl->type = new_decl->type;
+	  decl->csym = new_decl->csym;
 	}
-      return false;
+
+      libcall_decls[libcall] = decl;
     }
   else
     {
-      ti = dsym->isTemplateInstance();
-      if (ti)
+      // Check if it's a front-end builtin.
+      Dsymbol *dsym = decl->toParent();
+      Module *mod;
+
+      if (dsym == NULL)
+	return;
+
+      mod = dsym->getModule();
+
+      if (is_intrinsic_module_p (mod))
 	{
+	  // Matches order of Intrinsic enum
+	  static const char *intrinsic_names[] = {
+	      "bsf", "bsr", "bswap",
+	      "btc", "btr", "bts",
+	  };
+	  const size_t sz = sizeof (intrinsic_names) / sizeof (char *);
+	  int i = binary (decl->ident->string, intrinsic_names, sz);
+
+	  if (i == -1)
+	    return;
+
+	  // Make sure 'i' is within the range we require.
+	  gcc_assert (i >= INTRINSIC_BSF && i <= INTRINSIC_BTS);
 	  tree t = decl->toSymbol()->Stree;
-	  if (ti->tempdecl == gen.stdargTemplateDecl)
+
+	  DECL_BUILT_IN_CLASS (t) = BUILT_IN_FRONTEND;
+	  DECL_FUNCTION_CODE (t) = (built_in_function) i;
+	}
+      else if (is_math_module_p (mod))
+	{
+	  // Matches order of Intrinsic enum
+	  static const char *math_names[] = {
+	      "cos", "fabs", "ldexp",
+	      "rint", "rndtol", "sin",
+	      "sqrt",
+	  };
+	  const size_t sz = sizeof (math_names) / sizeof (char *);
+	  int i = binary (decl->ident->string, math_names, sz);
+
+	  if (i == -1)
+	    return;
+
+	  // Adjust 'i' for this range of enums
+	  i += INTRINSIC_COS;
+	  gcc_assert (i >= INTRINSIC_COS && i <= INTRINSIC_SQRT);
+	  tree t = decl->toSymbol()->Stree;
+
+	  // rndtol returns a long type, sqrt any float type,
+	  // every other math builtin returns a real type.
+	  Type *tf = decl->type->nextOf();
+	  if ((i == INTRINSIC_RNDTOL && tf->ty == Tint64)
+	      || (i == INTRINSIC_SQRT && tf->isreal())
+	      || (i != INTRINSIC_RNDTOL && tf->ty == Tfloat80))
+	    {
+	      DECL_BUILT_IN_CLASS (t) = BUILT_IN_FRONTEND;
+	      DECL_FUNCTION_CODE (t) = (built_in_function) i;
+	    }
+	}
+      else
+	{
+	  TemplateInstance *ti = dsym->isTemplateInstance();
+
+	  if (ti == NULL)
+	    return;
+
+	  tree t = decl->toSymbol()->Stree;
+
+	  if (is_builtin_va_arg_p (ti->tempdecl, false))
 	    {
 	      DECL_BUILT_IN_CLASS (t) = BUILT_IN_FRONTEND;
 	      DECL_FUNCTION_CODE (t) = (built_in_function) INTRINSIC_VA_ARG;
-	      return true;
 	    }
-	  if (ti->tempdecl == gen.cstdargTemplateDecl)
+	  else if (is_builtin_va_arg_p (ti->tempdecl, true))
 	    {
 	      DECL_BUILT_IN_CLASS (t) = BUILT_IN_FRONTEND;
 	      DECL_FUNCTION_CODE (t) = (built_in_function) INTRINSIC_C_VA_ARG;
-	      return true;
 	    }
-	  else if (ti->tempdecl == gen.cstdargStartTemplateDecl)
+	  else if (is_builtin_va_start_p (ti->tempdecl))
 	    {
 	      DECL_BUILT_IN_CLASS (t) = BUILT_IN_FRONTEND;
-	      DECL_FUNCTION_CODE (t) = (built_in_function) INTRINSIC_C_VA_START;
-	      return true;
+	      DECL_FUNCTION_CODE (t) = (built_in_function) INTRINSIC_VA_START;
 	    }
 	}
     }
-  return false;
 }
 
 // Build and return D's internal exception Object.
@@ -3676,15 +3631,13 @@ IRState::buildChain (FuncDeclaration *func)
   gcc_assert(COMPLETE_TYPE_P (frame_rec_type));
 
   tree frame_decl = localVar (frame_rec_type);
-  tree frame_ptr = build_address (frame_decl);
   DECL_NAME (frame_decl) = get_identifier ("__frame");
   DECL_IGNORED_P (frame_decl) = 0;
   expandDecl (frame_decl);
 
   // set the first entry to the parent frame, if any
   tree chain_link = chainLink();
-  tree chain_field = component_ref (build_deref (frame_ptr),
-				    TYPE_FIELDS (frame_rec_type));
+  tree chain_field = component_ref (frame_decl, TYPE_FIELDS (frame_rec_type));
 
   if (chain_link == NULL_TREE)
     chain_link = d_null_pointer;
@@ -3701,12 +3654,12 @@ IRState::buildChain (FuncDeclaration *func)
 
       Symbol *vsym = v->toSymbol();
 
-      tree frame_field = component_ref (build_deref (frame_ptr), vsym->SframeField);
+      tree frame_field = component_ref (frame_decl, vsym->SframeField);
       tree frame_expr = vmodify_expr (frame_field, vsym->Stree);
       addExp (frame_expr);
     }
 
-  useChain (this->func, frame_ptr);
+  useChain (this->func, build_address (frame_decl));
 }
 
 tree
@@ -3815,7 +3768,7 @@ IRState::getFrameInfo (FuncDeclaration *fd)
 
   // Nested functions, or functions with nested refs must create
   // a static frame for local variables to be referenced from.
-  if (fd->closureVars.dim != 0)
+  if (fd->vthis || fd->closureVars.dim != 0)
     ffi->creates_frame = true;
 
   // Functions with In/Out contracts pass parameters to nested frame.
@@ -4587,14 +4540,14 @@ ArrayScope::ArrayScope (IRState *irs, VarDeclaration *ini_v, const Loc& loc) :
 // the temp var decl to be used.
 
 tree
-ArrayScope::setArrayExp (IRState *irs, tree e, Type *t)
+ArrayScope::setArrayExp (tree e, Type *t)
 {
   if (this->var_)
     {
       tree v = this->var_->toSymbol()->Stree;
       if (t->toBasetype()->ty != Tsarray)
 	e = maybe_make_temp (e);
-      DECL_INITIAL (v) = irs->arrayLength (e, t);
+      DECL_INITIAL (v) = get_array_length (e, t);
     }
   return e;
 }
@@ -4602,7 +4555,7 @@ ArrayScope::setArrayExp (IRState *irs, tree e, Type *t)
 // Wrap-up temp var into a BIND_EXPR.
 
 tree
-ArrayScope::finish (IRState *irs, tree e)
+ArrayScope::finish (tree e)
 {
   if (this->var_)
     {
@@ -4611,7 +4564,7 @@ ArrayScope::finish (IRState *irs, tree e)
       if (TREE_CODE (t) == VAR_DECL)
 	{
 	  gcc_assert (!s->SframeField);
-	  return irs->binding (t, e);
+	  return bind_expr (t, e);
 	}
       else
 	gcc_unreachable();

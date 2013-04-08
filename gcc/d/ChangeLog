@@ -1,3 +1,84 @@
+2013-04-07  Iain Buclaw  <ibuclaw@gdcproject.org>
+
+	* d-decls.cc(FuncDeclaration::toSymbol): Push deferred functions to
+	FuncDeclaration::deferred.
+	* d-elem.cc(DelegateExp::toElem): Likewise.
+	(FuncExp::toElem): Likewise.
+	* d-objfile.cc(ObjectFile::shouldEmit): Likewise.
+	(FuncDeclaration::toObjFile): Process all deferred functions in
+	FuncDeclaration::deferred.
+	* symbol.cc(Symbol::deferredNestedFuncs): Remove.
+
+2013-04-05  Iain Buclaw  <ibuclaw@gdcproject.org>
+
+	* d-elem.cc(FuncExp::toElem): Defer function literals and lambdas
+	until parent function has finished processing.
+
+2013-04-04  Iain Buclaw  <ibuclaw@gdcproject.org>
+
+	* d-codegen.cc(IRState::buildChain): Use __frame decl directly when
+	setting up the function frame.
+	(maybe_set_builtin_frontend): Exit early if symbol has no parent.
+	* d-decls.cc(FuncDeclaration::toSymbol): Defer all nested functions,
+	not just templated instances.
+	* d-objfile.cc(FuncDeclaration::toObjFile): Delay processed deferred
+	nested functions until function has finished being generated.
+	(ObjectFile::shouldEmit): Don't emit nested functions if the parent
+	function hasn't finished processing.
+
+2013-04-03  Iain Buclaw  <ibuclaw@gdcproject.org>
+
+	* d-codegen.cc(maybe_set_builtin_frontend): Merged from
+	maybe_set_builtin and maybe_set_libcall.
+	* d-decls.cc(FuncDeclaration::toSymbol): Use
+	maybe_set_builtin_frontend.
+
+2013-03-31  Iain Buclaw  <ibuclaw@gdcproject.org>
+
+	* d-lang.cc(d_init_options): Default module info emission to on.
+	(d_handle_option): New femit-moduleinfo switch.
+	* d-objfile.cc(Module::genobjfile): Don't emit module if disabled
+	explicitly.
+	* d-builtins(is_intrinsic_module_p): New function to test whether
+	module is core.bitops.
+	(is_math_module_p): New function to test whether module is std.math or
+	core.stdc.math.
+	(is_builtin_va_arg_p): New function to test whether symbol is
+	specially handled va_arg template.
+	(is_builtin_va_start_p): New function to test whether symbol is
+	specially handled va_start template.
+	* d-codegen.cc(IRState::binding): Replace with bind_expr.
+	(IRState::mathModule): Replace with std_math_module.
+	(IRState::mathCoreModule): Replace with core_math_module.
+	(IRState::intrinsicModule): Replace with std_intrinsic_module.
+	(IRState::cstdargTemplateDecl): Replace with va_arg_template.
+	(IRState::stdargTemplateDecl): Replace with va_arg2_template.
+	(IRState::cstdargStartTemplateDecl): Replace with va_start_template.
+	(IRState::getLibCallDecl): Replace with get_libcall.
+	(IRState::maybeSetLibCallDecl): Replace with maybe_set_libcall.
+	(IRState::libCall): Replace with build_libcall.
+	(IRState::maybeSetUpBuiltin): Replace with maybe_set_builtin.
+	(IRState::Intrinsic): Move enum out of IRState.
+
+2013-03-30  Iain Buclaw  <ibuclaw@gdcproject.org>
+
+	* d-codegen.cc(IRState::darrayPtrRef): Replace with d_array_ptr.
+	(IRState::darrayLenRef): Replace with d_array_length.
+	(IRState::darrayVal): Replace with d_array_value.
+	(IRState::darrayString): Replace with d_array_string.
+	(IRState::arrayLength): Replace with get_array_length.
+	(get_object_method): Remove dependancy on irs parameter.
+	* d-lang.cc(d_init): Use static bool std_inc to determine whether to
+	include standard module paths.
+	(d_post_options): Canonicalize the input filename.
+	(d_parse_file): Correctly catch cases where input file is stdin.
+
+2013-03-27  Iain Buclaw  <ibuclaw@gdcproject.org>
+
+	* d-codegen.cc(IRState::getFrameInfo) Create a custom static chain for
+	all nested functions.
+	* d-gcc-includes.h: Rename to d-system.h
+
 2013-03-24  Iain Buclaw  <ibuclaw@gdcproject.org>
 
 	* GDC 4.8 branch created.
@@ -6,7 +87,16 @@
 
 	* d-builtins.c(d_bi_init): Set REALPAD to be TYPE_PRECISION of
 	long_double_type_node.
-	* d-codegen.cc(IRState::twoFieldType): Rename to build_two_field_type.
+	* d-codegen.cc(IRState::twoFieldType): Replace with
+	build_two_field_type.
+	(IRState::arrayOpNotImplemented): Replace with unhandled_arrayop_p.
+	(IRState::delegateMethodRef): Replace with delegate_method.
+	(IRState::delegateObjectRef): Replace with delegate_object.
+	(IRState::delegateVal): Replace with build_delegate_cst.
+	(IRState::methodCallExpr): Replace with build_method_call.
+	(IRState::extractMethodCallExpr): Replace with
+	extract_from_method_call.
+	(IRState::objectInstanceMethod): Replace with get_object_method.
 	(IRState::twoFieldCtor): Remove.
 	(IRState::call): Assert that if calling a normal FUNCTION_TYPE,
 	'object' is not set.
